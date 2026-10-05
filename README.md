@@ -1,0 +1,1 @@
+This applet allows for pairing the bluetooth headset in a click, essentially.

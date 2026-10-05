@@ -1,0 +1,7 @@
+{
+  "version": "0.1.0",
+  "uuid": "bluetooth-headset-control",
+  "name": "Bluetooth Headset Control",
+  "max-instances": 1,
+  "description": "An evil applet for the Cinnamon panel, that allows the pair their bluetooth headset."
+}
