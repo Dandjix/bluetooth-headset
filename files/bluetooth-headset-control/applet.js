@@ -3,6 +3,9 @@ const Main = imports.ui.main;
 const GLib = imports.gi.GLib;
 const Gio = imports.gi.Gio;
 const GUdev = imports.gi.GUdev;
+const Mainloop = imports.mainloop;
+const Lang = imports.lang;
+
 
 Gio._promisify(Gio.File.prototype, 'load_contents_async', 'load_contents_finish');
 Gio._promisify(Gio.Subprocess.prototype, 'communicate_utf8_async', 'communicate_utf8_finish');
@@ -18,6 +21,7 @@ const Icon_bluetooth_loading = `${AppletDir}/icons/bluetooth-loading.svg`
 class BHsT_stateMachineState {
     enter(stateMachine) { }
     leave(stateMachine) { }
+    cleanup(stateMachine) { }
     clickedIcon(stateMachine) { }
     middleClickedIcon(stateMachine) { }
 }
@@ -26,7 +30,6 @@ class BHsT_stateMachineState {
 class BHsT_stateSpeakers extends BHsT_stateMachineState {
     enter(stateMachine) {
         stateMachine.update_appearance(Icon_speaker, "Click to pair and use headset");
-        stateMachine.disconnect().then(() => {global.log("disco nected")})
     }
     clickedIcon(stateMachine) {
         stateMachine.change("pairing")
@@ -38,27 +41,89 @@ class BHsT_stateSpeakers extends BHsT_stateMachineState {
 
 class BHsT_stateHeadset extends BHsT_stateMachineState {
     enter(stateMachine) {
-        stateMachine.update_appearance(Icon_headphones, "Click to disconnect and use speakers")
-
+        stateMachine.update_appearance(
+            Icon_headphones, 
+            "Click to disconnect and use speakers"
+        )
+        this._update_loop(stateMachine)
+    }
+    leave(stateMachine){
+        if(this._updateLoopId)
+        {
+            Mainloop.source_remove(this._updateLoopId);
+        }
+    }
+    cleanup(stateMachine){
+        if(this._updateLoopId)
+        {
+            Mainloop.source_remove(this._updateLoopId);
+        }
     }
     clickedIcon(stateMachine) {
         stateMachine.change("speaker")
     }
     middleClickedIcon(stateMachine) {
-
     }
+    _update_loop(stateMachine)
+    {
+        stateMachine.get_battery(stateMachine.current_headphone_device).then(
+            (battery) => {
+                if(stateMachine.mode_current == this)
+                {
+                    this._set_battery_level(stateMachine,battery)
+                }
+            }
+        )
+        this._updateLoopId = Mainloop.timeout_add(5000, Lang.bind(this,() => this._update_loop(stateMachine)));
+    }
+    _set_battery_level(stateMachine,battery_level)
+    {
+        if(battery_level !== null || battery_level !== undefined)
+        {
+            stateMachine.update_appearance(
+                Icon_headphones, 
+                "Click to disconnect and use speakers",
+                `${battery_level}%`,
+                this._labelColor(battery_level)
+            )
+        }
+        else
+        {
+            stateMachine.update_appearance(
+                Icon_headphones, 
+                "Click to disconnect and use speakers",
+            )
+        }
+    }
+    _labelColor(battery_level)
+    {
+        if(battery_level >= 95)
+        {
+            return "#00ff00"
+        }
+        else if(battery_level >= 40)
+        {
+            return "#ffffff"
+        }
+        else if(battery_level >= 20)
+        {
+            return "#ffff00"
+        }
+        else
+        {
+            return "#ff0000"
+        }
+    }
+
 }
 
 class BHsT_statePairing extends BHsT_stateMachineState {
     async pair(stateMachine) {
-        global.log("finding ...")
         const device = await stateMachine.find_headset("Fairbuds XL")
-        global.log(`found : ${device}`)
         if (!device) {
             return "speaker"
         }
         const success = await stateMachine.connect_headset(device)
-        global.log(`success : ${success}`)
         if (!success) {
             return "speaker"
         }
@@ -68,9 +133,7 @@ class BHsT_statePairing extends BHsT_stateMachineState {
 
     enter(stateMachine) {
         stateMachine.update_appearance(Icon_bluetooth_loading, "Click cancel and use speakers")
-        global.log("launching pair ...")
         this.pair(stateMachine).then((device) => {
-            global.log(`pair done : ${device}`)
             stateMachine.change(device)
         })
     }
@@ -82,7 +145,7 @@ class BHsT_statePairing extends BHsT_stateMachineState {
     }
 }
 
-class BluetoothHeadsetControl extends Applet.IconApplet {
+class BluetoothHeadsetControl extends Applet.TextIconApplet {
 
     constructor(metadata, orientation, panelHeight, instanceId) {
         super(orientation, panelHeight, instanceId);
@@ -99,10 +162,13 @@ class BluetoothHeadsetControl extends Applet.IconApplet {
         this.mode_current.enter(this)
     }
 
-    update_appearance(icon, tooltip) {
+    update_appearance(icon, tooltip, label = "", color="#ffffff") {
         this.set_applet_icon_path(icon);
         this._applet_icon.set_icon_size(20);
         this.set_applet_tooltip(tooltip);
+        this.set_applet_label(label)
+
+        this._applet_label.set_style(`color: ${color};`);
     }
 
     change(mode_name) {
@@ -136,7 +202,7 @@ class BluetoothHeadsetControl extends Applet.IconApplet {
 
     on_applet_removed_from_panel() {
         //cleanup : restore default functionnality
-
+        this.mode_current.cleanup(this)
     }
 
     // -- pairing logic
@@ -160,8 +226,45 @@ class BluetoothHeadsetControl extends Applet.IconApplet {
             return true
         }
         catch (e) {
-            global.logError(`exception while listing devvices : ${e}`)
             return false
+        }
+    }
+
+    async get_battery(headset_device)
+    {
+        try{
+
+            const proc = Gio.Subprocess.new(
+                ["bluetoothctl"],
+                Gio.SubprocessFlags.STDIN_PIPE |
+                Gio.SubprocessFlags.STDOUT_PIPE |
+                Gio.SubprocessFlags.STDERR_SILENCE
+            );
+            const input = [
+                `info ${headset_device}`
+            ].join('\n') + '\n';
+            
+            const [stdout] = await proc.communicate_utf8_async(input, null);
+            
+            const lines = stdout.split("\n")
+            
+            const prefix = "Battery Percentage: "
+            const battery_lines = lines.filter((l) => l.trim().startsWith(prefix))
+            
+            if(battery_lines.length != 1) 
+                return null;
+            
+            const line = battery_lines[0].trim()
+            
+            const level_hex = battery_lines[0].substring(prefix.length).split()[0].trim().split(' ')[0]
+            
+            const level_number = Number(level_hex)
+            
+            return level_number
+        }
+        catch(e)
+        {
+            return null
         }
     }
 
