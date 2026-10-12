@@ -5,18 +5,21 @@ const Gio = imports.gi.Gio;
 const GUdev = imports.gi.GUdev;
 const Mainloop = imports.mainloop;
 const Lang = imports.lang;
-
-
 Gio._promisify(Gio.File.prototype, 'load_contents_async', 'load_contents_finish');
 Gio._promisify(Gio.Subprocess.prototype, 'communicate_utf8_async', 'communicate_utf8_finish');
+//my imports
+const UUID = `bluetooth-headset-control`
+const AppletImportDir = imports.ui.appletManager.applets[UUID];
+const config = AppletImportDir.config.config
+const commands = AppletImportDir.commands
 
+//file paths
+const AppletDirPath = `${GLib.get_home_dir()}/.local/share/cinnamon/applets/bluetooth-headset-control`
 
-const AppletDir = `${GLib.get_home_dir()}/.local/share/cinnamon/applets/bluetooth-headset-control`
-
-const Icon_loading = `${AppletDir}/icons/content-loading-symbolic.svg`
-const Icon_headphones = `${AppletDir}/icons/headphones.svg`
-const Icon_speaker = `${AppletDir}/icons/speaker.svg`
-const Icon_bluetooth_loading = `${AppletDir}/icons/bluetooth-loading.svg`
+const Icon_loading = `${AppletDirPath}/icons/content-loading-symbolic.svg`
+const Icon_headphones = `${AppletDirPath}/icons/headphones.svg`
+const Icon_speaker = `${AppletDirPath}/icons/speaker.svg`
+const Icon_bluetooth_loading = `${AppletDirPath}/icons/bluetooth-loading.svg`
 
 class BHsT_stateMachineState {
     enter(stateMachine) { }
@@ -24,6 +27,7 @@ class BHsT_stateMachineState {
     cleanup(stateMachine) { }
     clickedIcon(stateMachine) { }
     middleClickedIcon(stateMachine) { }
+    async update(stateMachine) {}
 }
 
 
@@ -45,37 +49,28 @@ class BHsT_stateHeadset extends BHsT_stateMachineState {
             Icon_headphones, 
             "Click to disconnect and use speakers"
         )
-        this._update_loop(stateMachine)
+    }
+    async update(stateMachine)
+    {
+        const battery = await commands.get_battery(stateMachine.current_headphone_device);
+        if(stateMachine.mode_current == this)
+        {
+            this._set_battery_level(stateMachine,battery)
+            global.log(`set battery level to : ${battery}`)
+        }
     }
     leave(stateMachine){
-        if(this._updateLoopId)
-        {
-            Mainloop.source_remove(this._updateLoopId);
-        }
+
     }
     cleanup(stateMachine){
-        if(this._updateLoopId)
-        {
-            Mainloop.source_remove(this._updateLoopId);
-        }
+
     }
     clickedIcon(stateMachine) {
         stateMachine.change("speaker")
     }
     middleClickedIcon(stateMachine) {
     }
-    _update_loop(stateMachine)
-    {
-        stateMachine.get_battery(stateMachine.current_headphone_device).then(
-            (battery) => {
-                if(stateMachine.mode_current == this)
-                {
-                    this._set_battery_level(stateMachine,battery)
-                }
-            }
-        )
-        this._updateLoopId = Mainloop.timeout_add(5000, Lang.bind(this,() => this._update_loop(stateMachine)));
-    }
+
     _set_battery_level(stateMachine,battery_level)
     {
         if(battery_level !== null || battery_level !== undefined)
@@ -119,23 +114,29 @@ class BHsT_stateHeadset extends BHsT_stateMachineState {
 
 class BHsT_statePairing extends BHsT_stateMachineState {
     async pair(stateMachine) {
-        const device = await stateMachine.find_headset("Fairbuds XL")
+        const device = await commands.find_headset(config.headset_name)
         if (!device) {
             return "speaker"
         }
-        const success = await stateMachine.connect_headset(device)
+        const success = await commands.connect_headset(device)
         if (!success) {
             return "speaker"
         }
         return "headphone"
     }
 
+    async update(stateMachine)
+    {
+        const device = await this.pair(stateMachine)
+
+        global.log(`device gotten from pairing pair : ${device}`)
+
+        stateMachine.change(device)
+    }
 
     enter(stateMachine) {
         stateMachine.update_appearance(Icon_bluetooth_loading, "Click cancel and use speakers")
-        this.pair(stateMachine).then((device) => {
-            stateMachine.change(device)
-        })
+
     }
     clickedIcon(stateMachine) {
         stateMachine.change("speaker")
@@ -158,8 +159,11 @@ class BluetoothHeadsetControl extends Applet.TextIconApplet {
         this.mode_current = this.mode_pairing
 
         this.current_headphone_device = ""
-
+        
         this.mode_current.enter(this)
+
+        this._update_loop_id = undefined
+        this._update_loop()
     }
 
     update_appearance(icon, tooltip, label = "", color="#ffffff") {
@@ -170,7 +174,30 @@ class BluetoothHeadsetControl extends Applet.TextIconApplet {
 
         this._applet_label.set_style(`color: ${color};`);
     }
+    _update_loop()
+    {
+        try{
+            this.mode_current.update(this).catch(e => {
 
+                const error = `[BTHS] mode update failed: ${e}`
+
+                global.logError(error);
+                Main.notify(error);
+            });
+            
+            this._update_loop_id = Mainloop.timeout_add(config.timer.repeat, Lang.bind(this,() => this._update_loop(this)));
+            global.log(`update loop done, next id : ${this._update_loop_id}`)
+        }
+        catch(e)
+        {
+            const error = `[BTHS] applet update loop error : ${e}`
+
+            global.logError(error);
+            Main.notify(error);
+        }
+    }
+
+    
     change(mode_name) {
         if (mode_name == "headphone") {
             this.mode_current.leave(this)
@@ -190,6 +217,12 @@ class BluetoothHeadsetControl extends Applet.TextIconApplet {
         else {
             throw `Cannot change to mode : ${mode_name}`
         }
+        //we execute the loop, but not using _update_loop since that would cause it to repeat in a loop, which is weird and a memory leak also
+        this.mode_current.update(this).catch(e => {
+            const error = `[BTHS] mode update failed (transition call): ${e}`
+            global.logError(error);
+            Main.notify(error)
+        });
     }
 
     on_applet_clicked() {
@@ -201,181 +234,25 @@ class BluetoothHeadsetControl extends Applet.TextIconApplet {
     }
 
     on_applet_removed_from_panel() {
-        //cleanup : restore default functionnality
-        this.mode_current.cleanup(this)
-    }
-
-    // -- pairing logic
-
-    async device_unicity() {
-        try {
-            const proc = Gio.Subprocess.new(['bluetoothctl', 'list'], Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE);
-
-            const stdout = (await proc.communicate_utf8_async(null, null))[0];
-
-            let lines = stdout.split("\n");
-
-            lines = lines.filter((l) => l);
-
-            if (lines.length != 1) {
-                return false
-            }
-
-            const controller = lines[0];
-
-            return true
-        }
-        catch (e) {
-            return false
-        }
-    }
-
-    async get_battery(headset_device)
-    {
         try{
+            global.log("removing applet ...")
+            //cleanup : restore default functionnality
+            this.mode_current.cleanup(this)
 
-            const proc = Gio.Subprocess.new(
-                ["bluetoothctl"],
-                Gio.SubprocessFlags.STDIN_PIPE |
-                Gio.SubprocessFlags.STDOUT_PIPE |
-                Gio.SubprocessFlags.STDERR_SILENCE
-            );
-            const input = [
-                `info ${headset_device}`
-            ].join('\n') + '\n';
-            
-            const [stdout] = await proc.communicate_utf8_async(input, null);
-            
-            const lines = stdout.split("\n")
-            
-            const prefix = "Battery Percentage: "
-            const battery_lines = lines.filter((l) => l.trim().startsWith(prefix))
-            
-            if(battery_lines.length != 1) 
-                return null;
-            
-            const line = battery_lines[0].trim()
-            
-            const level_hex = battery_lines[0].substring(prefix.length).split()[0].trim().split(' ')[0]
-            
-            const level_number = Number(level_hex)
-            
-            return level_number
+            if(this._update_loop_id)
+            {
+                Mainloop.source_remove(this._update_loop_id);
+                global.log(`removed loop ${this._update_loop_id} !`)
+            }
+            global.log("applet removed !")
         }
         catch(e)
         {
-            return null
+            const error = `[BTHS] encountered error while removing applet : ${e}`
+            global.logError(error)
+            Main.notify(error)
         }
     }
-
-    async find_headset(name) {
-        try {
-            const proc = Gio.Subprocess.new(
-                ["bluetoothctl"],
-                Gio.SubprocessFlags.STDIN_PIPE |
-                Gio.SubprocessFlags.STDOUT_PIPE |
-                Gio.SubprocessFlags.STDERR_SILENCE
-            );
-
-            const input = [
-                'devices',
-            ].join('\n') + '\n';
-
-            const [stdout] = await proc.communicate_utf8_async(input, null);
-
-            const lines = stdout.split("\n")
-
-            const device_lines = lines.filter((l) => l.trim().startsWith("Device") && l.trim().endsWith(name))
-
-            if (device_lines.length != 1) {
-                return ""
-            }
-            const headphone_line = device_lines[0]
-
-            const prefix = "Device "
-            const suffix = ` ${name}`
-            const id = headphone_line.substring(prefix.length, headphone_line.length - suffix.length)
-
-            return id
-        }
-        catch (e) {
-            global.logError(`bad-bad horrible thing-thing happened : ${e}`)
-            return ""
-        }
-    }
-
-    async connect_headset(headset_device) {
-        try {
-            const proc = Gio.Subprocess.new(
-                ["bluetoothctl"],
-                Gio.SubprocessFlags.STDIN_PIPE |
-                Gio.SubprocessFlags.STDERR_SILENCE
-            );
-
-            const input = [
-                `connect ${headset_device}`,
-            ].join('\n') + '\n';
-
-            const [stdout] = await proc.communicate_utf8_async(input, null);
-
-            global.log(`result of connecting : ${stdout}`)
-
-            this.current_headphone_device = headset_device
-
-            return true
-        }
-        catch (e) {
-            global.logError(`bad-bad horrible thing-thing happened : ${e}`)
-            return false
-        }
-    }
-
-    async turn_off_bluetooth() {
-        try {
-            const proc = Gio.Subprocess.new(
-                ["bluetoothctl"],
-                Gio.SubprocessFlags.STDIN_PIPE |
-                Gio.SubprocessFlags.STDERR_SILENCE
-            );
-
-            const input = [
-                'power off',
-            ].join('\n') + '\n';
-
-            const [stdout] = await proc.communicate_utf8_async(input, null);
-            return true
-        }
-        catch (e) {
-            global.logError(`bad-bad horrible thing-thing happened : ${e}`)
-            return false
-        }
-    }
-
-    async disconnect(){
-        try {
-            const proc = Gio.Subprocess.new(
-                ["bluetoothctl"],
-                Gio.SubprocessFlags.STDIN_PIPE |
-                Gio.SubprocessFlags.STDERR_SILENCE
-            );
-
-            const input = [
-                `disconnect ${this.current_headphone_device}`,
-            ].join('\n') + '\n';
-
-            const [stdout] = await proc.communicate_utf8_async(input, null);
-            this.current_headphone_device = ""
-            return true
-        }
-        catch (e) {
-            global.logError(`bad-bad horrible thing-thing happened : ${e}`)
-            return false
-        }
-    }
-
-
-    // -- speaker use logic
-
 }
 
 function main(metadata, orientation, panelHeight, instanceId) { // Define the main function receiving the standard parameters sent during the instantiation of the applet to the panel
