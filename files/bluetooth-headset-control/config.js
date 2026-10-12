@@ -3,4 +3,7 @@ var config = {
     "timer":{
         "repeat" : 3000
     },
+    "pairing":{
+        "post_connection_number_of_tries" : 5,
+    },
 }

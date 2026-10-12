@@ -90,6 +90,7 @@ async function connect_headset(headset_device) {
         const proc = Gio.Subprocess.new(
             ["bluetoothctl"],
             Gio.SubprocessFlags.STDIN_PIPE |
+            Gio.SubprocessFlags.STDOUT_PIPE |
             Gio.SubprocessFlags.STDERR_SILENCE
         );
 
@@ -97,15 +98,12 @@ async function connect_headset(headset_device) {
             `connect ${headset_device}`,
         ].join('\n') + '\n';
 
-        const [stdout] = await proc.communicate_utf8_async(input, null);
+        await proc.communicate_utf8_async(input, null);
 
-        global.log(`result of connecting : ${stdout}`)
-
-        return true
+        return {success : true, error: ""}
     }
     catch (e) {
-        global.logError(`bad-bad horrible thing-thing happened : ${e}`)
-        return false
+        return {success : false, error: `connection error : ${e}`}
     }
 }
 
@@ -114,6 +112,7 @@ async function turn_off_bluetooth() {
         const proc = Gio.Subprocess.new(
             ["bluetoothctl"],
             Gio.SubprocessFlags.STDIN_PIPE |
+            Gio.SubprocessFlags.STDOUT_PIPE |
             Gio.SubprocessFlags.STDERR_SILENCE
         );
 
@@ -132,9 +131,16 @@ async function turn_off_bluetooth() {
 
 async function disconnect(device){
     try {
+        if(device === undefined || device === "" || device.trim() == "undefined")
+        {
+            global.log("yep, bad device")
+            throw new Error(`bad device argument : ${device}`)
+        }
+
         const proc = Gio.Subprocess.new(
             ["bluetoothctl"],
             Gio.SubprocessFlags.STDIN_PIPE |
+            Gio.SubprocessFlags.STDOUT_PIPE |
             Gio.SubprocessFlags.STDERR_SILENCE
         );
 
@@ -144,9 +150,38 @@ async function disconnect(device){
 
         const [stdout] = await proc.communicate_utf8_async(input, null);
 
+        global.log(`stout : ${stdout}`)
+
         return {success:true,error:""}
     }
     catch (e) {
         return {success:false,error:`error on disconnect : ${e}`}
     }
+}
+
+
+async function is_connected(device)
+{
+    try {
+
+        const proc = Gio.Subprocess.new(
+            ["bluetoothctl"],
+            Gio.SubprocessFlags.STDIN_PIPE |
+            Gio.SubprocessFlags.STDOUT_PIPE |
+            Gio.SubprocessFlags.STDERR_SILENCE
+        );
+
+        const input = [
+            `devices Connected`,
+        ].join('\n') + '\n';
+
+        const [stdout] = await proc.communicate_utf8_async(input, null);
+
+        const result = stdout.includes(device)
+
+        return {success:true,result:result,error:""}
+    }
+    catch (e) {
+        return {success:false,result:false,error:`error on disconnect : ${e}`}
+    } 
 }

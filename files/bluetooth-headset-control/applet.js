@@ -22,17 +22,41 @@ const Icon_speaker = `${AppletDirPath}/icons/speaker.svg`
 const Icon_bluetooth_loading = `${AppletDirPath}/icons/bluetooth-loading.svg`
 
 class BHsT_stateMachineState {
-    enter(stateMachine) { }
-    leave(stateMachine) { }
+    /**
+     * called when entering the state, after the previous state has left.
+     * @param {BluetoothHeadsetControl} stateMachine - the state machine, which is also the cinnamon widget
+     */
+    async enter(stateMachine) { }
+    /**
+     * called when leaving the state, before the next state has entered
+     * @param {BluetoothHeadsetControl} stateMachine - the state machine, which is also the cinnamon widget
+     */
+    async leave(stateMachine) { }
+    /**
+     * called when the applet is removed from the pannel
+     * @param {BluetoothHeadsetControl} stateMachine - the state machine, which is also the cinnamon widget
+     */
     cleanup(stateMachine) { }
+    /**
+     * called when the applet icon is clicked
+     * @param {BluetoothHeadsetControl} stateMachine - the state machine, which is also the cinnamon widget
+     */
     clickedIcon(stateMachine) { }
+    /**
+     * called when the applet icon is middle clicked
+     * @param {BluetoothHeadsetControl} stateMachine - the state machine, which is also the cinnamon widget
+     */
     middleClickedIcon(stateMachine) { }
+    /**
+     * called at a regular interval.
+     * @param {BluetoothHeadsetControl} stateMachine - the state machine, which is also the cinnamon widget
+     */
     async update(stateMachine) {}
 }
 
 
 class BHsT_stateSpeakers extends BHsT_stateMachineState {
-    enter(stateMachine) {
+    async enter(stateMachine) {
         stateMachine.update_appearance(Icon_speaker, "Click to pair and use headset");
     }
     clickedIcon(stateMachine) {
@@ -44,7 +68,7 @@ class BHsT_stateSpeakers extends BHsT_stateMachineState {
 }
 
 class BHsT_stateHeadset extends BHsT_stateMachineState {
-    enter(stateMachine) {
+    async enter(stateMachine) {
         stateMachine.update_appearance(
             Icon_headphones, 
             "Click to disconnect and use speakers"
@@ -52,15 +76,37 @@ class BHsT_stateHeadset extends BHsT_stateMachineState {
     }
     async update(stateMachine)
     {
+        const {
+            success: is_connected_success,
+            result: is_connected_result,
+            error: is_connected_error
+        } = await commands.is_connected(stateMachine.current_headphone_device);
+
+        if(!is_connected_success)
+        {
+            const error = `[BTHS] connection check error : ${is_connected_error}`
+            global.log(error)
+            Main.notify(error)
+
+            stateMachine.change("speaker")
+            return;
+        }
+        if(is_connected_result == false)
+        {
+            stateMachine.change("speaker")
+            return;
+        }
+
+
+
         const battery = await commands.get_battery(stateMachine.current_headphone_device);
         if(stateMachine.mode_current == this)
         {
             this._set_battery_level(stateMachine,battery)
-            global.log(`set battery level to : ${battery}`)
         }
     }
-    leave(stateMachine){
-        commands.disconnect().then((ret) => {
+    async leave(stateMachine){
+        commands.disconnect(stateMachine.current_headphone_device).then((ret) => {
             const {success, error: disconnect_error} = ret
             if( ! success)
             {
@@ -73,9 +119,6 @@ class BHsT_stateHeadset extends BHsT_stateMachineState {
 
             stateMachine.current_headphone_device = ""
         })
-    }
-    cleanup(stateMachine){
-
     }
     clickedIcon(stateMachine) {
         stateMachine.change("speaker")
@@ -125,14 +168,19 @@ class BHsT_stateHeadset extends BHsT_stateMachineState {
 }
 
 class BHsT_statePairing extends BHsT_stateMachineState {
+
+    has_paired_sucessfully = false
+
+    checks_done = 0
+
     async pair(stateMachine) {
         const device = await commands.find_headset(config.headset_name)
         if (!device) {
             return {success : false, error:`headset : [${config.headset_name}] could not be found.`}
         }
-        const success = await commands.connect_headset(device)
+        const {success, error} = await commands.connect_headset(device)
         if (!success) {
-            return {success : false, error:`could not connect to : [${config.headset_name}] (${device})`}
+            return {success,error}
         }
         
         stateMachine.current_headphone_device = device
@@ -141,22 +189,45 @@ class BHsT_statePairing extends BHsT_stateMachineState {
 
     async update(stateMachine)
     {
-        const {success, error: pair_error} = await this.pair(stateMachine)
+        if(!this.has_paired_sucessfully) //if we have not yet paired successfully, we do. if it fails, we leave.
+        {
+            const {success, error: pair_error} = await this.pair(stateMachine)
 
+            if(! success)
+            {
+                const error = `[BTHS] pairing error : ${pair_error}`
+                global.logError(error)
+                Main.notify(error)
+                stateMachine.change("speaker")
+            }
+            else
+            {
+                this.has_paired_sucessfully = true
+            }
+            return
+        }
+        //if we have paired, we wait until the device is detected or we reach `post_connection_number_of_tries` tries
+        if(this.checks_done > config.pairing.post_connection_number_of_tries)
+        {
+            stateMachine.change("speaker")
+            return
+        }
+        const {success, result, error} = await commands.is_connected(stateMachine.current_headphone_device)
         if(! success)
         {
-            const error = `[BTHS] ${pair_error}`
-            global.logError(error)
-            Main.notify(error)
-            stateMachine.change("speaker")
+            throw new Error(`pairing connection check error : ${error}`)
         }
-        else
+        if(result)
         {
             stateMachine.change("headphone")
+            return
         }
+        this.checks_done++
     }
 
-    enter(stateMachine) {
+    async enter(stateMachine) {
+        this.has_paired_sucessfully = false
+        this.checks_done = 0
         stateMachine.update_appearance(Icon_bluetooth_loading, "Click cancel and use speakers")
 
     }
@@ -208,7 +279,6 @@ class BluetoothHeadsetControl extends Applet.TextIconApplet {
             });
             
             this._update_loop_id = Mainloop.timeout_add(config.timer.repeat, Lang.bind(this,() => this._update_loop(this)));
-            global.log(`update loop done, next id : ${this._update_loop_id}`)
         }
         catch(e)
         {
@@ -219,32 +289,38 @@ class BluetoothHeadsetControl extends Applet.TextIconApplet {
         }
     }
 
-    
+    /**
+     * changes the state machine mode, updating the ui and switching the update method and such.
+     * 
+     * @param {'headphone' | 'speaker' | 'pairing'} mode_name - the name of the mode to switch to
+     */
     change(mode_name) {
+        let new_mode
         if (mode_name == "headphone") {
-            this.mode_current.leave(this)
-            this.mode_current = this.mode_headphones
-            this.mode_current.enter(this)
+            new_mode = this.mode_headphones
         }
         else if (mode_name == "speaker") {
-            this.mode_current.leave(this)
-            this.mode_current = this.mode_speaker
-            this.mode_current.enter(this)
+            new_mode = this.mode_speaker
         }
         else if (mode_name == "pairing") {
-            this.mode_current.leave(this)
-            this.mode_current = this.mode_pairing
-            this.mode_current.enter(this)
+            new_mode = this.mode_pairing
         }
         else {
             throw `Cannot change to mode : ${mode_name}`
         }
-        //we execute the loop, but not using _update_loop since that would cause it to repeat in a loop, which is weird and a memory leak also
-        this.mode_current.update(this).catch(e => {
-            const error = `[BTHS] mode update failed (transition call): ${e}`
-            global.logError(error);
-            Main.notify(error)
-        });
+
+        this.mode_current.leave(this)
+        this.mode_current = new_mode
+        this.mode_current.enter(this).then(()=>{
+            //we execute the loop, but not using _update_loop since that would cause it to repeat in a loop, which is weird and a memory leak also
+            this.mode_current.update(this).catch(e => {
+                const error = `[BTHS] mode update failed (transition call): ${e}`
+                global.logError(error);
+                Main.notify(error)
+            });
+        })
+
+
     }
 
     on_applet_clicked() {
@@ -257,16 +333,13 @@ class BluetoothHeadsetControl extends Applet.TextIconApplet {
 
     on_applet_removed_from_panel() {
         try{
-            global.log("[BTHS] removing applet ...")
             //cleanup : restore default functionnality
             this.mode_current.cleanup(this)
 
             if(this._update_loop_id)
             {
                 Mainloop.source_remove(this._update_loop_id);
-                global.log(`removed loop ${this._update_loop_id} !`)
             }
-            global.log("applet removed !")
         }
         catch(e)
         {
@@ -280,16 +353,6 @@ class BluetoothHeadsetControl extends Applet.TextIconApplet {
 function main(metadata, orientation, panelHeight, instanceId) { // Define the main function receiving the standard parameters sent during the instantiation of the applet to the panel
 
     const applet = new BluetoothHeadsetControl(metadata, orientation, panelHeight, instanceId);
-
-    // var parent = Object.getPrototypeOf(applet)
-    // global.log(Object.getOwnPropertyNames(applet))
-    // while(parent !==  null)
-    // {
-    //     global.log(`\n--${parent.constructor.name}--\n`)
-    //     global.log(Object.getOwnPropertyNames(parent))
-    //     parent = Object.getPrototypeOf(parent)
-    // }
-    // global.log(JSON.stringify(applet.finalizeContextMenu))
 
     return applet
 }
