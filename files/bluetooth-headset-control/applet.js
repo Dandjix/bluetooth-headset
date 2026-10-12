@@ -73,7 +73,7 @@ class BHsT_stateHeadset extends BHsT_stateMachineState {
 
     _set_battery_level(stateMachine,battery_level)
     {
-        if(battery_level !== null || battery_level !== undefined)
+        if(battery_level !== null && battery_level !== undefined)
         {
             stateMachine.update_appearance(
                 Icon_headphones, 
