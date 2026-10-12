@@ -65,6 +65,25 @@ class BHsT_stateSpeakers extends BHsT_stateMachineState {
     middleClickedIcon(stateMachine) {
 
     }
+    async update(stateMachine){
+        const device_name = await commands.find_headset(config.headset_name)
+
+        global.log(`found device : ${device_name}`)
+
+        if(!device_name)
+        {
+            return
+        }
+        const {success, result, error} = await commands.is_connected(device_name)
+
+        global.log(`connected ? : ${result}`)
+
+        if(! success || ! result)
+        {
+            return
+        }
+        stateMachine.change("headphone")
+    }
 }
 
 class BHsT_stateHeadset extends BHsT_stateMachineState {
