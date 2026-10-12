@@ -101,8 +101,6 @@ async function connect_headset(headset_device) {
 
         global.log(`result of connecting : ${stdout}`)
 
-        this.current_headphone_device = headset_device
-
         return true
     }
     catch (e) {
@@ -132,7 +130,7 @@ async function turn_off_bluetooth() {
     }
 }
 
-async function disconnect(){
+async function disconnect(device){
     try {
         const proc = Gio.Subprocess.new(
             ["bluetoothctl"],
@@ -141,15 +139,14 @@ async function disconnect(){
         );
 
         const input = [
-            `disconnect ${this.current_headphone_device}`,
+            `disconnect ${device}`,
         ].join('\n') + '\n';
 
         const [stdout] = await proc.communicate_utf8_async(input, null);
-        this.current_headphone_device = ""
-        return true
+
+        return {success:true,error:""}
     }
     catch (e) {
-        global.logError(`bad-bad horrible thing-thing happened : ${e}`)
-        return false
+        return {success:false,error:`error on disconnect : ${e}`}
     }
 }

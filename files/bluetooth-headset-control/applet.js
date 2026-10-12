@@ -60,7 +60,19 @@ class BHsT_stateHeadset extends BHsT_stateMachineState {
         }
     }
     leave(stateMachine){
+        commands.disconnect().then((ret) => {
+            const {success, error: disconnect_error} = ret
+            if( ! success)
+            {
+                const error = `[BTHS] disconnect error : ${disconnect_error}`
+                global.log(error)
+                global.logError(disconnect_error)
+    
+                Main.notify(disconnect_error)
+            }
 
+            stateMachine.current_headphone_device = ""
+        })
     }
     cleanup(stateMachine){
 
@@ -116,22 +128,32 @@ class BHsT_statePairing extends BHsT_stateMachineState {
     async pair(stateMachine) {
         const device = await commands.find_headset(config.headset_name)
         if (!device) {
-            return "speaker"
+            return {success : false, error:`headset : [${config.headset_name}] could not be found.`}
         }
         const success = await commands.connect_headset(device)
         if (!success) {
-            return "speaker"
+            return {success : false, error:`could not connect to : [${config.headset_name}] (${device})`}
         }
-        return "headphone"
+        
+        stateMachine.current_headphone_device = device
+        return {success : true, error:""}
     }
 
     async update(stateMachine)
     {
-        const device = await this.pair(stateMachine)
+        const {success, error: pair_error} = await this.pair(stateMachine)
 
-        global.log(`device gotten from pairing pair : ${device}`)
-
-        stateMachine.change(device)
+        if(! success)
+        {
+            const error = `[BTHS] ${pair_error}`
+            global.logError(error)
+            Main.notify(error)
+            stateMachine.change("speaker")
+        }
+        else
+        {
+            stateMachine.change("headphone")
+        }
     }
 
     enter(stateMachine) {
@@ -235,7 +257,7 @@ class BluetoothHeadsetControl extends Applet.TextIconApplet {
 
     on_applet_removed_from_panel() {
         try{
-            global.log("removing applet ...")
+            global.log("[BTHS] removing applet ...")
             //cleanup : restore default functionnality
             this.mode_current.cleanup(this)
 
